@@ -4,6 +4,7 @@ import uuid
 import sqlite3
 import datetime
 import urllib.request
+import math
 import cv2
 import numpy as np
 import streamlit as st
@@ -20,7 +21,7 @@ from ultralytics import YOLO
 # Page Setup
 st.set_page_config(page_title="RoadGuard | Automated Pothole Intelligence", page_icon="🛣️", layout="wide")
 
-# ==================== 1. GPS EXTRACTION ====================
+# ==================== 1. GPS & DISTANCE UTILS ====================
 def convert_to_degrees(value):
     try:
         d, m, s = value
@@ -51,6 +52,15 @@ def extract_exif_gps(image: Image.Image):
     except Exception:
         pass
     return None, None
+
+def calculate_distance_meters(lat1, lon1, lat2, lon2):
+    """Calculates Haversine distance in meters between two GPS coordinates."""
+    R = 6371000.0  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0)**2
+    return round(R * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a)), 1)
 
 # ==================== 2. AI MODEL DETECTOR ====================
 class AutomatedPotholeDetector:
@@ -83,10 +93,20 @@ class AutomatedPotholeDetector:
         annotated_img = Image.fromarray(cv2.cvtColor(annotated_np, cv2.COLOR_BGR2RGB))
         return annotated_img, count, round(avg_conf, 2), round(severity, 2)
 
-# ==================== 3. DATABASE SETUP & DEMO SEED ====================
+# ==================== 3. SHARED DATABASE SETUP ====================
 DB_PATH = "reports_local.db"
 IMG_DIR = "uploaded_images"
 os.makedirs(IMG_DIR, exist_ok=True)
+
+USE_SUPABASE = False
+supabase_client = None
+if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+    try:
+        from supabase import create_client
+        supabase_client = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+        USE_SUPABASE = True
+    except Exception:
+        USE_SUPABASE = False
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -95,7 +115,7 @@ def init_db():
         latitude REAL, longitude REAL, pothole_count INTEGER,
         confidence_avg REAL, severity_score REAL, status TEXT DEFAULT 'pending')''')
     
-    # Pre-seed sample pothole data so the map is never empty
+    # Pre-seed realistic demo data so the map is never empty
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM reports")
     if c.fetchone()[0] == 0:
@@ -113,6 +133,13 @@ def init_db():
 init_db()
 
 def get_all_reports():
+    if USE_SUPABASE and supabase_client:
+        try:
+            res = supabase_client.table("reports").select("*").execute()
+            if res.data:
+                return res.data
+        except Exception:
+            pass
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query("SELECT * FROM reports ORDER BY created_at DESC", conn)
     conn.close()
@@ -122,6 +149,18 @@ def save_report(image_bytes, file_name, lat, lng, count, conf, sev):
     path = os.path.join(IMG_DIR, file_name)
     with open(path, "wb") as f:
         f.write(image_bytes)
+
+    if USE_SUPABASE and supabase_client:
+        try:
+            supabase_client.storage.from_("pothole-images").upload(file_name, image_bytes, {"content-type": "image/jpeg"})
+            public_url = supabase_client.storage.from_("pothole-images").get_public_url(file_name)
+            supabase_client.table("reports").insert({
+                "image_url": public_url, "latitude": lat, "longitude": lng,
+                "pothole_count": count, "confidence_avg": conf, "severity_score": sev
+            }).execute()
+        except Exception:
+            pass
+
     conn = sqlite3.connect(DB_PATH)
     conn.execute('''INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                  (str(uuid.uuid4()), datetime.datetime.now().isoformat(), path, lat, lng, count, conf, sev, 'pending'))
@@ -166,39 +205,87 @@ def compute_municipal_priorities(reports_df, radius_meters=40.0):
         })
     return pd.DataFrame(hotspots).sort_values(by="priority_score", ascending=False).reset_index(drop=True)
 
-def build_map(reports_df, hotspots_df=None):
-    if reports_df is None or len(reports_df) == 0:
-        return folium.Map(location=[28.6139, 77.2090], zoom_start=11, tiles="OpenStreetMap")
-    df = reports_df.copy()
-    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-    df['severity_score'] = pd.to_numeric(df.get('severity_score', 1.0), errors='coerce').fillna(1.0)
-    df = df.dropna(subset=['latitude', 'longitude'])
-    if df.empty:
-        return folium.Map(location=[28.6139, 77.2090], zoom_start=11, tiles="OpenStreetMap")
+def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
+    center_lat = user_lat if user_lat else 28.6139
+    center_lng = user_lng if user_lng else 77.2090
 
-    # Uses OpenStreetMap: 100% Free, NO API KEY NEEDED
-    m = folium.Map(location=[float(df['latitude'].mean()), float(df['longitude'].mean())], zoom_start=13, tiles="OpenStreetMap")
-    
-    # Heatmap
-    HeatMap([[float(r['latitude']), float(r['longitude']), float(r['severity_score'])] for _, r in df.iterrows()], radius=18, blur=14).add_to(m)
-    
-    # Markers
-    cluster = MarkerCluster(name="Individual Reports").add_to(m)
-    for _, r in df.iterrows():
+    if reports_df is not None and not reports_df.empty:
+        df = reports_df.copy()
+        df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+        df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        df = df.dropna(subset=['latitude', 'longitude'])
+        if not df.empty and not user_lat:
+            center_lat = float(df['latitude'].mean())
+            center_lng = float(df['longitude'].mean())
+
+    # Map with 100% Free OpenStreetMap
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=14, tiles="OpenStreetMap")
+
+    # 1. Plot User's Current GPS Position (Blue Marker)
+    if user_lat and user_lng:
         folium.Marker(
-            [float(r['latitude']), float(r['longitude'])],
-            popup=f"Potholes: {int(r.get('pothole_count', 1))} | Severity: {float(r['severity_score']):.1f}/10",
-            icon=folium.Icon(color="red" if float(r['severity_score']) >= 6 else "orange", icon="warning", prefix="fa")
-        ).add_to(cluster)
+            [user_lat, user_lng],
+            popup="<b>📍 You Are Here (Current Location)</b>",
+            tooltip="Your Current GPS Position",
+            icon=folium.Icon(color="blue", icon="user", prefix="fa")
+        ).add_to(m)
 
-    # Zones
+        # 500-meter detection radar around user
+        folium.Circle(
+            [user_lat, user_lng],
+            radius=500,
+            color="#0984e3",
+            fill=True,
+            fill_opacity=0.1,
+            tooltip="500m Hazard Detection Range"
+        ).add_to(m)
+
+    # 2. Potholes Layer
+    if reports_df is not None and not reports_df.empty:
+        df = reports_df.copy()
+        df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+        df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        df['severity_score'] = pd.to_numeric(df.get('severity_score', 1.0), errors='coerce').fillna(1.0)
+        df = df.dropna(subset=['latitude', 'longitude'])
+
+        # Heatmap
+        HeatMap([[float(r['latitude']), float(r['longitude']), float(r['severity_score'])] for _, r in df.iterrows()], radius=18, blur=14).add_to(m)
+
+        # Individual Pothole Markers
+        cluster = MarkerCluster(name="Reported Potholes").add_to(m)
+        for _, r in df.iterrows():
+            dist_str = ""
+            if user_lat and user_lng:
+                dist = calculate_distance_meters(user_lat, user_lng, float(r['latitude']), float(r['longitude']))
+                dist_str = f"<br/><b>Distance to you:</b> {dist} meters"
+
+            popup_html = f"""
+            <div style="font-family: Arial; width: 180px;">
+                <b>Potholes Detected:</b> {int(r.get('pothole_count', 1))}<br/>
+                <b>Severity:</b> {float(r['severity_score']):.1f} / 10
+                {dist_str}
+            </div>
+            """
+            folium.Marker(
+                [float(r['latitude']), float(r['longitude'])],
+                popup=popup_html,
+                icon=folium.Icon(color="red" if float(r['severity_score']) >= 6 else "orange", icon="warning", prefix="fa")
+            ).add_to(cluster)
+
+    # 3. High-Priority Municipal Zones
     if hotspots_df is not None and not hotspots_df.empty:
         colors = {"CRITICAL": "#d63031", "HIGH": "#e17055", "MEDIUM": "#fdcb6e"}
-        zones = folium.FeatureGroup(name="Priority Zones").add_to(m)
+        zones = folium.FeatureGroup(name="Priority Action Zones").add_to(m)
         for _, s in hotspots_df.iterrows():
-            folium.Circle([float(s['latitude']), float(s['longitude'])], radius=45, color=colors.get(s['urgency'], "#d63031"), fill=True, fill_opacity=0.45).add_to(zones)
-    
+            folium.Circle(
+                [float(s['latitude']), float(s['longitude'])],
+                radius=45,
+                color=colors.get(s['urgency'], "#d63031"),
+                fill=True,
+                fill_opacity=0.45,
+                popup=f"Zone #{s['cluster_id']} [{s['urgency']}]: {s['report_count']} reports"
+            ).add_to(zones)
+
     folium.LayerControl().add_to(m)
     return m
 
@@ -216,29 +303,32 @@ if "last_result" not in st.session_state:
 
 # ==================== 6. USER INTERFACE ====================
 st.title("🛣️ RoadGuard: Automated Pothole Intelligence")
-st.caption("AI-powered road defect capture, geospatial clustering, and municipal repair dispatch.")
+st.caption("Crowdsourced road defect capture, live proximity alerts, and municipal repair dispatch.")
 
-tab_upload, tab_map, tab_admin = st.tabs(["⚡ Auto-Detection", "🗺️ Live Heatmap", "🏛️ Municipal Priority Zones"])
+tab_upload, tab_map, tab_admin = st.tabs(["⚡ Auto-Detection", "🗺️ Live Heatmap & Nearby Alerts", "🏛️ Municipal Priority Zones"])
+
+# Fetch User Browser GPS
+gps = get_geolocation()
+user_curr_lat, user_curr_lng = None, None
+if gps and "coords" in gps and gps["coords"]:
+    user_curr_lat = round(gps["coords"].get("latitude", 0.0), 6)
+    user_curr_lng = round(gps["coords"].get("longitude", 0.0), 6)
 
 with tab_upload:
     st.subheader("Automated Road Defect Capture")
-    gps = get_geolocation()
-    b_lat, b_lng = None, None
-    if gps and "coords" in gps and gps["coords"]:
-        b_lat = round(gps["coords"].get("latitude", 0.0), 6)
-        b_lng = round(gps["coords"].get("longitude", 0.0), 6)
+    st.write("Upload or snap a road photo. The pothole is automatically detected, GPS-tagged, and published for all users to see.")
 
     img_file = st.file_uploader("Upload or Snap Road Photo", type=["jpg", "jpeg", "png"])
     if img_file is not None:
         pil_img = Image.open(img_file)
         sig = f"{img_file.name}_{img_file.size}"
-        f_lat, f_lng = b_lat, b_lng
+        f_lat, f_lng = user_curr_lat, user_curr_lng
         if not f_lat or not f_lng:
             ex_lat, ex_lng = extract_exif_gps(pil_img)
             if ex_lat and ex_lng:
                 f_lat, f_lng = ex_lat, ex_lng
         if not f_lat or not f_lng:
-            st.info("📍 Location not auto-detected from browser or EXIF. Confirm coordinates:")
+            st.info("📍 Location not auto-detected. Confirm coordinates:")
             c1, c2 = st.columns(2)
             f_lat = c1.number_input("Latitude", value=28.6139, format="%.6f")
             f_lng = c2.number_input("Longitude", value=77.2090, format="%.6f")
@@ -249,50 +339,4 @@ with tab_upload:
                 if count > 0:
                     buf = io.BytesIO()
                     ann_img.save(buf, format="JPEG")
-                    save_report(buf.getvalue(), f"{uuid.uuid4()}.jpg", f_lat, f_lng, count, conf, sev)
-                st.session_state.processed_files.add(sig)
-                st.session_state.last_result = {
-                    "count": count, "conf": conf, "sev": sev,
-                    "ann_img": ann_img, "orig": pil_img,
-                    "coords": (f_lat, f_lng)
-                }
-
-        res = st.session_state.last_result
-        if res:
-            if res["count"] == 0:
-                st.info("✅ Road surface looks clear! No potholes detected in this frame.")
-                st.image(res["orig"], caption="Clean Road Surface", width=400)
-            else:
-                st.error(f"🚨 Automatically Detected {res['count']} Pothole(s)! Severity: {res['sev']}/10 (Confidence: {int(res['conf']*100)}%)")
-                ca, cb = st.columns(2)
-                with ca:
-                    st.image(res["ann_img"], caption="Automated YOLOv8 Bounding Boxes", use_column_width=True)
-                with cb:
-                    st.success(f"📍 Tagged GPS: ({res['coords'][0]}, {res['coords'][1]})")
-                    st.metric("Potholes Detected", res["count"])
-                    st.metric("Severity Score", f"{res['sev']} / 10")
-                    st.success("✅ Report automatically logged and transmitted to Municipal Database!")
-
-with tab_map:
-    st.subheader("Live Interactive Road Surface Map")
-    records = get_all_reports()
-    if records:
-        df_rep = pd.DataFrame(records)
-        hotspots = compute_municipal_priorities(df_rep)
-        f_map = build_map(df_rep, hotspots)
-        st_folium(f_map, use_container_width=True, height=550)
-    else:
-        st.info("No reports logged yet.")
-
-with tab_admin:
-    st.subheader("High-Priority Clusters for Municipal Repair Crews")
-    records = get_all_reports()
-    if records:
-        df_rep = pd.DataFrame(records)
-        hotspots = compute_municipal_priorities(df_rep)
-        if not hotspots.empty:
-            st.dataframe(hotspots[['cluster_id', 'urgency', 'priority_score', 'report_count', 'total_potholes', 'avg_severity', 'latitude', 'longitude']], use_container_width=True)
-            st.metric("Top Critical Cluster ID", f"Zone #{hotspots.iloc[0]['cluster_id']}")
-            st.metric("Total Flagged Repair Zones", len(hotspots))
-        else:
-            st.info("Single pothole reports visible on the Live Map.")
+                    save_report(buf.getvalue(), f"{
