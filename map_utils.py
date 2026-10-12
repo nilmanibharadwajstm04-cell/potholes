@@ -31,7 +31,7 @@ def build_map(reports_df, hotspots_df=None):
 
     center_lat = float(reports_df['latitude'].mean())
     center_lng = float(reports_df['longitude'].mean())
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=14, tiles="CartoDB positron")
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=14, tiles="OpenStreetMap")
 
     # Layer 1: Density Heatmap
     heat_data = [[float(row['latitude']), float(row['longitude']), float(row.get('severity_score', 1.0))] for _, row in reports_df.iterrows()]
