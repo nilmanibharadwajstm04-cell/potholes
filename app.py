@@ -218,7 +218,7 @@ def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
             center_lat = float(df['latitude'].mean())
             center_lng = float(df['longitude'].mean())
 
-    # Map with 100% Free OpenStreetMap
+    # Map with 100% Free OpenStreetMap (NO API KEY REQUIRED)
     m = folium.Map(location=[center_lat, center_lng], zoom_start=14, tiles="OpenStreetMap")
 
     # 1. Plot User's Current GPS Position (Blue Marker)
@@ -230,7 +230,7 @@ def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
             icon=folium.Icon(color="blue", icon="user", prefix="fa")
         ).add_to(m)
 
-        # 500-meter detection radar around user
+        # 500-meter detection radar ring around user
         folium.Circle(
             [user_lat, user_lng],
             radius=500,
@@ -339,4 +339,72 @@ with tab_upload:
                 if count > 0:
                     buf = io.BytesIO()
                     ann_img.save(buf, format="JPEG")
-                    save_report(buf.getvalue(), f"{
+                    file_name = str(uuid.uuid4()) + ".jpg"
+                    save_report(buf.getvalue(), file_name, f_lat, f_lng, count, conf, sev)
+                st.session_state.processed_files.add(sig)
+                st.session_state.last_result = {
+                    "count": count, "conf": conf, "sev": sev,
+                    "ann_img": ann_img, "orig": pil_img,
+                    "coords": (f_lat, f_lng)
+                }
+
+        res = st.session_state.last_result
+        if res:
+            if res["count"] == 0:
+                st.info("✅ Road surface looks clear! No potholes detected in this frame.")
+                st.image(res["orig"], caption="Clean Road Surface", width=400)
+            else:
+                st.error(f"🚨 Automatically Detected {res['count']} Pothole(s)! Severity: {res['sev']}/10 (Confidence: {int(res['conf']*100)}%)")
+                ca, cb = st.columns(2)
+                with ca:
+                    st.image(res["ann_img"], caption="Automated YOLOv8 Bounding Boxes", use_column_width=True)
+                with cb:
+                    st.success(f"📍 Tagged GPS: ({res['coords'][0]}, {res['coords'][1]})")
+                    st.metric("Potholes Detected", res["count"])
+                    st.metric("Severity Score", f"{res['sev']} / 10")
+                    st.success("✅ Broadcasted! Any other user who arrives at this location will see this pothole on their map.")
+
+with tab_map:
+    st.subheader("Live Interactive Road Surface Map & Real-Time Proximity")
+    records = get_all_reports()
+
+    # REAL-TIME PROXIMITY ALERT FOR APPROACHING USERS
+    if records and user_curr_lat and user_curr_lng:
+        nearby_reports = []
+        for r in records:
+            r_lat = pd.to_numeric(r.get('latitude'), errors='coerce')
+            r_lng = pd.to_numeric(r.get('longitude'), errors='coerce')
+            if pd.notna(r_lat) and pd.notna(r_lng):
+                d = calculate_distance_meters(user_curr_lat, user_curr_lng, r_lat, r_lng)
+                if d <= 500:  # Within 500 meters
+                    nearby_reports.append((d, r))
+
+        if nearby_reports:
+            nearby_reports.sort(key=lambda x: x[0])
+            closest_dist, closest_report = nearby_reports[0]
+            st.error(f"⚠️ **HAZARD ALERT:** You are near **{len(nearby_reports)} reported pothole(s)**! Closest is **{closest_dist} meters away** (Severity: {closest_report.get('severity_score', 'N/A')}/10). Drive with caution!")
+        else:
+            st.success("✅ **Road Safe:** No reported potholes within 500 meters of your current location.")
+    elif not user_curr_lat:
+        st.info("💡 Enable browser location permissions to see your live **'📍 You Are Here'** pin and receive hazard alerts when approaching reported potholes.")
+
+    if records:
+        df_rep = pd.DataFrame(records)
+        hotspots = compute_municipal_priorities(df_rep)
+        f_map = build_map(df_rep, hotspots, user_lat=user_curr_lat, user_lng=user_curr_lng)
+        st_folium(f_map, use_container_width=True, height=550)
+    else:
+        st.info("No reports logged yet.")
+
+with tab_admin:
+    st.subheader("High-Priority Clusters for Municipal Repair Crews")
+    records = get_all_reports()
+    if records:
+        df_rep = pd.DataFrame(records)
+        hotspots = compute_municipal_priorities(df_rep)
+        if not hotspots.empty:
+            st.dataframe(hotspots[['cluster_id', 'urgency', 'priority_score', 'report_count', 'total_potholes', 'avg_severity', 'latitude', 'longitude']], use_container_width=True)
+            st.metric("Top Critical Cluster ID", f"Zone #{hotspots.iloc[0]['cluster_id']}")
+            st.metric("Total Flagged Repair Zones", len(hotspots))
+        else:
+            st.info("Single pothole reports visible on the Live Map.")
