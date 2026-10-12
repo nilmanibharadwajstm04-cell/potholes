@@ -26,7 +26,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for Glassmorphism, Clean Cards, and Image Overlays
+# Custom CSS for Glassmorphism, Road Backgrounds, and High-Tech Badges
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
@@ -42,23 +42,26 @@ st.markdown("""
         color: #f1f5f9;
     }
 
-    /* Hero Banner Header with Image */
+    /* Hero Banner Header with High-Tech Road Background */
     .hero-banner {
-        background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%);
-        border: 1px solid rgba(56, 189, 248, 0.25);
+        background: linear-gradient(135deg, rgba(8, 13, 22, 0.90) 0%, rgba(13, 21, 39, 0.85) 100%),
+                    url('https://images.unsplash.com/photo-1545459720-aac8509eb02c?auto=format&fit=crop&w=1200&q=80');
+        background-size: cover;
+        background-position: center;
+        border: 1px solid rgba(56, 189, 248, 0.3);
         border-radius: 20px;
-        padding: 26px 32px;
+        padding: 28px 34px;
         margin-bottom: 24px;
         backdrop-filter: blur(16px);
-        box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
+        box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
     }
 
     .badge-pill {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        background: rgba(14, 165, 233, 0.15);
-        border: 1px solid rgba(56, 189, 248, 0.4);
+        background: rgba(14, 165, 233, 0.2);
+        border: 1px solid rgba(56, 189, 248, 0.5);
         color: #38bdf8;
         font-size: 11px;
         font-weight: 700;
@@ -70,21 +73,21 @@ st.markdown("""
     }
 
     .hero-title {
-        font-size: 36px;
+        font-size: 38px;
         font-weight: 800;
         letter-spacing: -0.8px;
         margin: 0;
-        background: linear-gradient(135deg, #ffffff 30%, #38bdf8 100%);
+        background: linear-gradient(135deg, #ffffff 40%, #38bdf8 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
     }
 
     .hero-desc {
-        color: #94a3b8;
+        color: #cbd5e1;
         font-size: 14px;
         margin-top: 6px;
         margin-bottom: 0px;
-        line-height: 1.5;
+        line-height: 1.6;
     }
 
     /* Metric Cards */
@@ -115,7 +118,7 @@ st.markdown("""
         color: #94a3b8;
     }
 
-    /* Division Feature Image Cards */
+    /* Division Feature Cards */
     .feature-card {
         background: rgba(30, 41, 59, 0.6);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -471,7 +474,7 @@ if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
 # ==================== 7. HERO HEADER WITH ROAD IMAGERY ====================
-hero_left, hero_right = st.columns([1.6, 1.0])
+hero_left, hero_right = st.columns([1.55, 1.05])
 
 with hero_left:
     st.markdown("""
@@ -484,9 +487,12 @@ with hero_left:
 
 with hero_right:
     st.markdown("""
-    <div style="border-radius:18px;overflow:hidden;border:1px solid rgba(56,189,248,0.25);box-shadow:0 12px 32px rgba(0,0,0,0.4);height:170px;">
-        <img src="https://images.unsplash.com/photo-1508873696983-2df57046475a?auto=format&fit=crop&w=700&q=80" 
-             style="width:100%;height:100%;object-fit:cover;" alt="Smart Road Scanning"/>
+    <div style="position:relative;border-radius:20px;overflow:hidden;border:1px solid rgba(56,189,248,0.35);box-shadow:0 14px 36px rgba(0,0,0,0.5);height:175px;">
+        <img src="https://images.unsplash.com/photo-1498084393753-b411b2d26b34?auto=format&fit=crop&w=800&q=80" 
+             style="width:100%;height:100%;object-fit:cover;" alt="Live Road Scanner"/>
+        <div style="position:absolute;bottom:12px;left:14px;background:rgba(15,23,42,0.85);backdrop-filter:blur(8px);border:1px solid rgba(56,189,248,0.5);padding:5px 12px;border-radius:10px;font-size:12px;font-weight:700;color:#38bdf8;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+            📷 Live Vision Radar 🟢
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -525,7 +531,7 @@ with tab_upload:
     st.markdown("### 📷 Automated Road Defect Capture")
     st.caption("Upload or snap a road photo. The AI detects defects, calculates severity, logs GPS, and alerts drivers approaching this road segment.")
 
-    # Educational Guide Cards with Images
+    # Educational Guide Cards with Verified Working Images
     g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("""
@@ -540,7 +546,7 @@ with tab_upload:
     with g2:
         st.markdown("""
         <div class="feature-card">
-            <img src="https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=500&q=80" alt="AI Inference"/>
+            <img src="https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=500&q=80" alt="AI Inference"/>
             <div class="feature-card-content">
                 <b style="color:#38bdf8;">2. Instant YOLOv8 Inference</b><br/>
                 <small style="color:#94a3b8;">Deep neural network bounds cavities and calculates severity.</small>
@@ -704,3 +710,4 @@ with tab_admin:
                 """, unsafe_allow_html=True)
             else:
                 st.info("No dense multi-pothole clusters yet. Single reports are plotted on the Live Map.")
+                
