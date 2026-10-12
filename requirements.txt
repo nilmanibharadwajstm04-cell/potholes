@@ -1,0 +1,10 @@
+streamlit
+streamlit-folium
+streamlit-js-eval
+folium
+ultralytics
+supabase
+pandas
+scikit-learn
+pillow
+opencv-python-headless
