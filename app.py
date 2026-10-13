@@ -5,7 +5,6 @@ import sqlite3
 import datetime
 import urllib.request
 import math
-import cv2
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -26,180 +25,27 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for Glassmorphism, Road Backgrounds, and High-Tech Badges
-st.markdown("""
+# Compact, bulletproof CSS styling (no long string breaks)
+CUSTOM_CSS = """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    .stApp {
-        background: radial-gradient(circle at 10% 15%, rgba(14, 165, 233, 0.12) 0%, transparent 45%),
-                    radial-gradient(circle at 90% 85%, rgba(245, 158, 11, 0.08) 0%, transparent 45%),
-                    linear-gradient(180deg, #080d16 0%, #0d1527 50%, #0a0f1d 100%);
-        color: #f1f5f9;
-    }
-
-    /* Hero Banner Header with High-Tech Road Background */
-    .hero-banner {
-        background: linear-gradient(135deg, rgba(8, 13, 22, 0.90) 0%, rgba(13, 21, 39, 0.85) 100%),
-                    url('https://images.unsplash.com/photo-1545459720-aac8509eb02c?auto=format&fit=crop&w=1200&q=80');
-        background-size: cover;
-        background-position: center;
-        border: 1px solid rgba(56, 189, 248, 0.3);
-        border-radius: 20px;
-        padding: 28px 34px;
-        margin-bottom: 24px;
-        backdrop-filter: blur(16px);
-        box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
-    }
-
-    .badge-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        background: rgba(14, 165, 233, 0.2);
-        border: 1px solid rgba(56, 189, 248, 0.5);
-        color: #38bdf8;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 1.2px;
-        padding: 5px 14px;
-        border-radius: 9999px;
-        text-transform: uppercase;
-        margin-bottom: 12px;
-    }
-
-    .hero-title {
-        font-size: 38px;
-        font-weight: 800;
-        letter-spacing: -0.8px;
-        margin: 0;
-        background: linear-gradient(135deg, #ffffff 40%, #38bdf8 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-
-    .hero-desc {
-        color: #cbd5e1;
-        font-size: 14px;
-        margin-top: 6px;
-        margin-bottom: 0px;
-        line-height: 1.6;
-    }
-
-    /* Metric Cards */
-    .metric-card {
-        background: rgba(30, 41, 59, 0.55);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
-        padding: 18px 22px;
-        backdrop-filter: blur(12px);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-        transition: transform 0.2s ease, border-color 0.2s ease;
-    }
-    .metric-card:hover {
-        transform: translateY(-2px);
-        border-color: rgba(56, 189, 248, 0.35);
-    }
-    .metric-val {
-        font-size: 28px;
-        font-weight: 800;
-        color: #ffffff;
-        margin-top: 4px;
-    }
-    .metric-lbl {
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        color: #94a3b8;
-    }
-
-    /* Division Feature Cards */
-    .feature-card {
-        background: rgba(30, 41, 59, 0.6);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        overflow: hidden;
-        margin-bottom: 20px;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-    }
-    .feature-card img {
-        width: 100%;
-        height: 160px;
-        object-fit: cover;
-        display: block;
-    }
-    .feature-card-content {
-        padding: 16px 20px;
-    }
-
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        padding-bottom: 10px;
-        margin-bottom: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 10px;
-        padding: 10px 22px;
-        color: #94a3b8;
-        background: rgba(30, 41, 59, 0.45);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        font-weight: 600;
-        font-size: 14px;
-        transition: all 0.2s ease;
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, rgba(14, 165, 233, 0.2) 0%, rgba(3, 105, 161, 0.3) 100%) !important;
-        border-color: rgba(56, 189, 248, 0.5) !important;
-        color: #38bdf8 !important;
-        font-weight: 700 !important;
-        box-shadow: 0 4px 16px rgba(14, 165, 233, 0.2);
-    }
-
-    /* Buttons */
-    .stButton > button {
-        background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
-        color: #ffffff !important;
-        font-weight: 700 !important;
-        border: none !important;
-        border-radius: 12px !important;
-        padding: 12px 26px !important;
-        box-shadow: 0 4px 18px rgba(2, 132, 199, 0.35) !important;
-        transition: all 0.2s ease !important;
-    }
-    .stButton > button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 6px 24px rgba(2, 132, 199, 0.55) !important;
-    }
-
-    /* Alert Banners */
-    .hazard-box {
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15) 0%, rgba(185, 28, 28, 0.25) 100%);
-        border: 1px solid rgba(239, 68, 68, 0.4);
-        border-radius: 14px;
-        padding: 16px 20px;
-        color: #fca5a5;
-        font-weight: 500;
-        margin-bottom: 20px;
-        box-shadow: 0 8px 24px rgba(239, 68, 68, 0.15);
-    }
-    .safe-box {
-        background: linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(5, 150, 105, 0.2) 100%);
-        border: 1px solid rgba(16, 185, 129, 0.35);
-        border-radius: 14px;
-        padding: 16px 20px;
-        color: #6ee7b7;
-        font-weight: 500;
-        margin-bottom: 20px;
-    }
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+    html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
+    .stApp { background: radial-gradient(circle at 10% 15%, rgba(14,165,233,0.12) 0%, transparent 45%), linear-gradient(180deg, #080d16 0%, #0d1527 100%); color: #f1f5f9; }
+    .hero-banner { background: linear-gradient(135deg, rgba(8,13,22,0.9) 0%, rgba(13,21,39,0.85) 100%), url('https://images.unsplash.com/photo-1545459720-aac8509eb02c?auto=format&fit=crop&w=1200&q=80') center/cover; border: 1px solid rgba(56,189,248,0.3); border-radius: 20px; padding: 26px 32px; margin-bottom: 20px; }
+    .badge-pill { display: inline-block; background: rgba(14,165,233,0.2); border: 1px solid rgba(56,189,248,0.5); color: #38bdf8; font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 9999px; margin-bottom: 10px; }
+    .hero-title { font-size: 36px; font-weight: 800; margin: 0; background: linear-gradient(135deg, #fff 40%, #38bdf8 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero-desc { color: #cbd5e1; font-size: 14px; margin-top: 6px; }
+    .metric-card { background: rgba(30,41,59,0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 16px 20px; }
+    .metric-val { font-size: 26px; font-weight: 800; color: #fff; margin-top: 4px; }
+    .metric-lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; }
+    .feature-card { background: rgba(30,41,59,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; overflow: hidden; margin-bottom: 15px; }
+    .feature-card img { width: 100%; height: 140px; object-fit: cover; }
+    .feature-card-content { padding: 14px 18px; }
+    .hazard-box { background: rgba(239,68,68,0.18); border: 1px solid rgba(239,68,68,0.45); border-radius: 12px; padding: 14px 18px; color: #fca5a5; margin-bottom: 15px; }
+    .safe-box { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); border-radius: 12px; padding: 14px 18px; color: #6ee7b7; margin-bottom: 15px; }
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ==================== 2. GPS & DISTANCE UTILS ====================
 def convert_to_degrees(value):
@@ -269,7 +115,7 @@ class AutomatedPotholeDetector:
         total_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in boxes.xyxy.cpu().numpy())
         severity = min(10.0, (count * 2.0) + ((total_area / max(1.0, img_h * img_w)) * 20.0))
         annotated_np = result.plot()
-        annotated_img = Image.fromarray(cv2.cvtColor(annotated_np, cv2.COLOR_BGR2RGB))
+        annotated_img = Image.fromarray(annotated_np[:, :, ::-1])
         return annotated_img, count, round(avg_conf, 2), round(severity, 2)
 
 # ==================== 4. SHARED DATABASE SETUP ====================
@@ -293,7 +139,6 @@ def init_db():
         id TEXT PRIMARY KEY, created_at TEXT, image_url TEXT,
         latitude REAL, longitude REAL, pothole_count INTEGER,
         confidence_avg REAL, severity_score REAL, status TEXT DEFAULT 'pending')''')
-    
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM reports")
     if c.fetchone()[0] == 0:
@@ -531,7 +376,7 @@ with tab_upload:
     st.markdown("### 📷 Automated Road Defect Capture")
     st.caption("Upload or snap a road photo. The AI detects defects, calculates severity, logs GPS, and alerts drivers approaching this road segment.")
 
-    # Educational Guide Cards with Verified Working Images
+    # Educational Guide Cards
     g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("""
@@ -710,4 +555,3 @@ with tab_admin:
                 """, unsafe_allow_html=True)
             else:
                 st.info("No dense multi-pothole clusters yet. Single reports are plotted on the Live Map.")
-                
