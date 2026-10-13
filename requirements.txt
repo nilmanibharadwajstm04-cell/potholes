@@ -3,8 +3,8 @@ streamlit-folium
 streamlit-js-eval
 folium
 ultralytics
+opencv-python-headless
 supabase
 pandas
 scikit-learn
 pillow
-opencv-python-headless
