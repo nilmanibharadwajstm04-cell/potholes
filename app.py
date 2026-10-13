@@ -5,6 +5,7 @@ import sqlite3
 import datetime
 import urllib.request
 import math
+import cv2
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -268,8 +269,7 @@ class AutomatedPotholeDetector:
         total_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in boxes.xyxy.cpu().numpy())
         severity = min(10.0, (count * 2.0) + ((total_area / max(1.0, img_h * img_w)) * 20.0))
         annotated_np = result.plot()
-        # Flip BGR to RGB using pure NumPy (Zero OpenCV / cv2 dependency)
-        annotated_img = Image.fromarray(annotated_np[:, :, ::-1])
+        annotated_img = Image.fromarray(cv2.cvtColor(annotated_np, cv2.COLOR_BGR2RGB))
         return annotated_img, count, round(avg_conf, 2), round(severity, 2)
 
 # ==================== 4. SHARED DATABASE SETUP ====================
@@ -710,3 +710,4 @@ with tab_admin:
                 """, unsafe_allow_html=True)
             else:
                 st.info("No dense multi-pothole clusters yet. Single reports are plotted on the Live Map.")
+                
