@@ -1,6 +1,7 @@
 import os
 import io
 import uuid
+import json
 import sqlite3
 import datetime
 import urllib.request
@@ -55,7 +56,43 @@ CUSTOM_CSS = """
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# ==================== 2. GPS & DISTANCE UTILS ====================
+# ==================== 2. GPS, REVERSE GEOCODING & TELEMETRY ====================
+LOCATION_CACHE = {}
+
+def get_place_name(lat, lng):
+    """
+    Reverse geocodes latitude/longitude into a real-world place, street, and city name
+    using OpenStreetMap Nominatim. Free, zero API key needed.
+    """
+    if lat is None or lng is None:
+        return "Unknown Location"
+    try:
+        lat_r = round(float(lat), 4)
+        lng_r = round(float(lng), 4)
+        cache_key = f"{lat_r}_{lng_r}"
+        if cache_key in LOCATION_CACHE:
+            return LOCATION_CACHE[cache_key]
+
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat_r}&lon={lng_r}&format=json"
+        req = urllib.request.Request(url, headers={'User-Agent': 'RoadGuard-CivicPlatform/2.0'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            addr = data.get('address', {})
+            road = addr.get('road') or addr.get('suburb') or addr.get('neighbourhood') or addr.get('pedestrian') or ''
+            city = addr.get('city') or addr.get('town') or addr.get('county') or addr.get('city_district') or ''
+            state = addr.get('state') or ''
+            parts = [p for p in [road, city, state] if p]
+            if parts:
+                res_name = ", ".join(parts)
+            else:
+                display = data.get('display_name', '')
+                res_name = ", ".join(display.split(',')[:3]) if display else f"Road Segment ({lat_r}, {lng_r})"
+            LOCATION_CACHE[cache_key] = res_name
+            return res_name
+    except Exception:
+        pass
+    return f"Road Segment ({lat:.4f}, {lng:.4f})"
+
 def convert_to_degrees(value):
     try:
         d, m, s = value
@@ -235,37 +272,58 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS reports (
         id TEXT PRIMARY KEY, created_at TEXT, image_url TEXT,
         latitude REAL, longitude REAL, pothole_count INTEGER,
-        confidence_avg REAL, severity_score REAL, status TEXT DEFAULT 'pending')''')
+        confidence_avg REAL, severity_score REAL, status TEXT DEFAULT 'pending',
+        location_name TEXT DEFAULT '')''')
+    try:
+        conn.execute("ALTER TABLE reports ADD COLUMN location_name TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM reports")
     if c.fetchone()[0] == 0:
         sample_reports = [
-            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6139, 77.2090, 3, 0.88, 7.5, 'pending'),
-            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6141, 77.2092, 2, 0.92, 6.2, 'pending'),
-            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6138, 77.2089, 4, 0.85, 8.8, 'pending'),
-            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6300, 77.2200, 1, 0.91, 3.2, 'pending'),
-            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6302, 77.2204, 2, 0.84, 4.5, 'pending'),
+            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6139, 77.2090, 3, 0.88, 7.5, 'pending', "Kartavya Path, New Delhi, Delhi"),
+            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6141, 77.2092, 2, 0.92, 6.2, 'pending', "Kartavya Path, New Delhi, Delhi"),
+            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6138, 77.2089, 4, 0.85, 8.8, 'pending', "Kartavya Path, New Delhi, Delhi"),
+            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6300, 77.2200, 1, 0.91, 3.2, 'pending', "Connaught Place, Central Delhi, Delhi"),
+            (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", 28.6302, 77.2204, 2, 0.84, 4.5, 'pending', "Connaught Place, Central Delhi, Delhi"),
         ]
-        conn.executemany("INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sample_reports)
+        conn.executemany("INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sample_reports)
     conn.commit()
     conn.close()
 
 init_db()
 
 def get_all_reports():
+    records = []
     if USE_SUPABASE and supabase_client:
         try:
             res = supabase_client.table("reports").select("*").execute()
             if res.data:
-                return res.data
+                records = res.data
         except Exception:
             pass
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM reports ORDER BY created_at DESC", conn)
-    conn.close()
-    return df.to_dict(orient="records")
+    if not records:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query("SELECT * FROM reports ORDER BY created_at DESC", conn)
+        conn.close()
+        records = df.to_dict(orient="records")
 
-def save_report(image_bytes, file_name, lat, lng, count, conf, sev):
+    # Ensure each report has a valid human-readable place name
+    for r in records:
+        if not r.get('location_name') or r.get('location_name') == "Unknown Location":
+            lat = pd.to_numeric(r.get('latitude'), errors='coerce')
+            lng = pd.to_numeric(r.get('longitude'), errors='coerce')
+            if pd.notna(lat) and pd.notna(lng):
+                r['location_name'] = get_place_name(lat, lng)
+            else:
+                r['location_name'] = "Unspecified Location"
+    return records
+
+def save_report(image_bytes, file_name, lat, lng, count, conf, sev, loc_name=None):
+    if not loc_name:
+        loc_name = get_place_name(lat, lng)
     path = os.path.join(IMG_DIR, file_name)
     with open(path, "wb") as f:
         f.write(image_bytes)
@@ -276,14 +334,15 @@ def save_report(image_bytes, file_name, lat, lng, count, conf, sev):
             public_url = supabase_client.storage.from_("pothole-images").get_public_url(file_name)
             supabase_client.table("reports").insert({
                 "image_url": public_url, "latitude": lat, "longitude": lng,
-                "pothole_count": count, "confidence_avg": conf, "severity_score": sev
+                "pothole_count": count, "confidence_avg": conf, "severity_score": sev,
+                "location_name": loc_name
             }).execute()
         except Exception:
             pass
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('''INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                 (str(uuid.uuid4()), datetime.datetime.now().isoformat(), path, lat, lng, count, conf, sev, 'pending'))
+    conn.execute('''INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                 (str(uuid.uuid4()), datetime.datetime.now().isoformat(), path, lat, lng, count, conf, sev, 'pending', loc_name))
     conn.commit()
     conn.close()
     return path
@@ -313,10 +372,23 @@ def compute_municipal_priorities(reports_df, radius_meters=40.0):
         av_sev = float(grp['severity_score'].mean())
         score = (rc * 3.0) + (tp * 2.0) + (av_sev * 2.5)
         urg = "CRITICAL" if score >= 30 else ("HIGH" if score >= 15 else "MEDIUM")
+        lat_c = float(grp['latitude'].mean())
+        lng_c = float(grp['longitude'].mean())
+        
+        # Determine human-readable location name for cluster
+        loc_name = ""
+        if 'location_name' in grp.columns:
+            valid_locs = [str(l) for l in grp['location_name'].dropna().tolist() if str(l).strip() and str(l) != "Unknown Location"]
+            if valid_locs:
+                loc_name = valid_locs[0]
+        if not loc_name:
+            loc_name = get_place_name(lat_c, lng_c)
+
         hotspots.append({
             "cluster_id": int(cid),
-            "latitude": float(grp['latitude'].mean()),
-            "longitude": float(grp['longitude'].mean()),
+            "location_name": loc_name,
+            "latitude": lat_c,
+            "longitude": lng_c,
             "report_count": rc,
             "total_potholes": tp,
             "avg_severity": round(av_sev, 2),
@@ -368,14 +440,16 @@ def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
 
         cluster = MarkerCluster(name="Reported Potholes").add_to(m)
         for _, r in df.iterrows():
+            loc_label = str(r.get('location_name', 'Road Defect Area'))
             dist_str = ""
             if user_lat and user_lng:
                 dist = calculate_distance_meters(user_lat, user_lng, float(r['latitude']), float(r['longitude']))
                 dist_str = f"<br/><b>Proximity:</b> <span style='color:#0284c7;font-weight:700;'>{dist} meters away</span>"
 
             popup_html = f"""
-            <div style="font-family: Arial, sans-serif; width: 190px; line-height:1.5;">
+            <div style="font-family: Arial, sans-serif; width: 220px; line-height:1.5;">
                 <b style="color:#ef4444;font-size:14px;">🚨 Pothole Hazard</b><br/>
+                <b>📍 Location:</b> <span style="color:#0284c7;font-weight:700;">{loc_label}</span><br/>
                 <b>Detected Count:</b> {int(r.get('pothole_count', 1))}<br/>
                 <b>Severity Index:</b> {float(r['severity_score']):.1f} / 10
                 {dist_str}
@@ -397,7 +471,7 @@ def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
                 color=colors.get(s['urgency'], "#ef4444"),
                 fill=True,
                 fill_opacity=0.45,
-                popup=f"Zone #{s['cluster_id']} [{s['urgency']}]: {s['report_count']} reports"
+                popup=f"Zone #{s['cluster_id']} [{s['urgency']}]: {s.get('location_name', 'Hotspot')} ({s['report_count']} reports)"
             ).add_to(zones)
 
     folium.LayerControl().add_to(m)
@@ -472,7 +546,7 @@ if gps and "coords" in gps and gps["coords"]:
 # ==================== TAB 1: REPORT POTHOLE DIVISION ====================
 with tab_upload:
     st.markdown("### 📷 Automated Road Defect Capture")
-    st.caption("Point your camera at the road. The AI detects all defect cavities simultaneously, calculates severity, logs GPS, and broadcasts live hazard radar alerts.")
+    st.caption("Point your camera at the road. The AI detects all defect cavities simultaneously, calculates severity, logs GPS with reverse-geocoded place names, and broadcasts live hazard radar alerts.")
 
     # Educational Guide Cards
     g1, g2, g3 = st.columns(3)
@@ -502,7 +576,7 @@ with tab_upload:
             <img src="https://images.unsplash.com/photo-1524661135-423995f22d0b?auto=format&fit=crop&w=500&q=80" alt="GPS Broadcast"/>
             <div class="feature-card-content">
                 <b style="color:#38bdf8;">3. Live Civic Broadcast</b><br/>
-                <small style="color:#94a3b8;">Coordinates are broadcasted to warn nearby commuters.</small>
+                <small style="color:#94a3b8;">Coordinates & place names broadcasted to warn commuters.</small>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -537,18 +611,20 @@ with tab_upload:
                 f_lng = c2.number_input("Longitude", value=77.2090, format="%.6f")
 
             if sig not in st.session_state.processed_files:
-                with st.spinner("🤖 Running multi-defect AI road inspection..."):
+                with st.spinner("🤖 Running multi-defect AI road inspection & geocoding..."):
+                    loc_name = get_place_name(f_lat, f_lng)
                     ann_img, count, conf, sev = detector.detect(pil_img)
                     if count > 0:
                         buf = io.BytesIO()
                         ann_img.save(buf, format="JPEG")
                         file_name = str(uuid.uuid4()) + ".jpg"
-                        save_report(buf.getvalue(), file_name, f_lat, f_lng, count, conf, sev)
+                        save_report(buf.getvalue(), file_name, f_lat, f_lng, count, conf, sev, loc_name)
                     st.session_state.processed_files.add(sig)
                     st.session_state.last_result = {
                         "count": count, "conf": conf, "sev": sev,
                         "ann_img": ann_img, "orig": pil_img,
-                        "coords": (f_lat, f_lng)
+                        "coords": (f_lat, f_lng),
+                        "location_name": loc_name
                     }
 
     with col_up_right:
@@ -562,10 +638,11 @@ with tab_upload:
                 st.image(res["ann_img"], caption=f"Multi-Defect AI Bounding Analysis ({res['count']} cavity zones identified)", use_container_width=True)
                 st.markdown(f"""
                 <div style="background:rgba(30,41,59,0.7);padding:14px;border-radius:12px;border:1px solid rgba(56,189,248,0.2);">
+                    <b>📍 Detected Location:</b> <span style="color:#38bdf8;font-weight:700;">{res.get('location_name', 'Road Segment')}</span><br/>
+                    <b>🗺️ Tagged Coordinates:</b> {res['coords'][0]}, {res['coords'][1]}<br/>
                     <b>📊 Defects Tagged:</b> <span style="color:#ef4444;font-weight:700;">{res['count']} Cavities</span><br/>
-                    <b>📍 Tagged Coordinates:</b> {res['coords'][0]}, {res['coords'][1]}<br/>
                     <b>🎯 AI Confidence Score:</b> {int(res['conf']*100)}%<br/>
-                    <b>📡 Status:</b> Broadcasted to public hazard map
+                    <b>📡 Status:</b> Broadcasted to public hazard map & municipal dispatch
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -592,9 +669,11 @@ with tab_map:
             if nearby_reports:
                 nearby_reports.sort(key=lambda x: x[0])
                 closest_dist, closest_report = nearby_reports[0]
+                loc_str = closest_report.get('location_name')
+                loc_msg = f" near <b>{loc_str}</b>" if loc_str else ""
                 st.markdown(f"""
                 <div class="hazard-box">
-                    ⚠️ <b>HAZARD ALERT:</b> You are approaching <b>{len(nearby_reports)} reported pothole(s)</b>! 
+                    ⚠️ <b>HAZARD ALERT:</b> You are approaching <b>{len(nearby_reports)} reported pothole(s)</b>{loc_msg}! 
                     Closest defect is <b>{closest_dist} meters ahead</b> (Severity: {closest_report.get('severity_score', 'N/A')}/10). Drive with caution!
                 </div>
                 """, unsafe_allow_html=True)
@@ -630,7 +709,7 @@ with tab_map:
 # ==================== TAB 3: MUNICIPAL ACTION DIVISION ====================
 with tab_admin:
     st.markdown("### 🏛️ Municipal Priority Action Zones")
-    st.caption("Density-Based Spatial Clustering (DBSCAN) automatically groups nearby defects into ranked repair work orders.")
+    st.caption("Density-Based Spatial Clustering (DBSCAN) automatically groups nearby defects into ranked repair work orders with verified street locations.")
 
     muni_col1, muni_col2 = st.columns([1.7, 1.3])
 
@@ -652,15 +731,26 @@ with tab_admin:
             df_rep = pd.DataFrame(records)
             hotspots = compute_municipal_priorities(df_rep)
             if not hotspots.empty:
-                st.dataframe(
-                    hotspots[['cluster_id', 'urgency', 'priority_score', 'report_count', 'total_potholes', 'avg_severity', 'latitude', 'longitude']],
-                    use_container_width=True
-                )
+                disp_df = hotspots[['cluster_id', 'urgency', 'location_name', 'priority_score', 'report_count', 'total_potholes', 'avg_severity', 'latitude', 'longitude']].copy()
+                disp_df.columns = ['Zone #', 'Urgency', '📍 Detected Place / Street Name', 'Priority Score', 'Citizen Reports', 'Total Potholes', 'Avg Severity', 'Latitude', 'Longitude']
+                st.dataframe(disp_df, use_container_width=True)
+
+                top_z = hotspots.iloc[0]
                 st.markdown(f"""
                 <div style="background:rgba(30,41,59,0.7);padding:16px;border-radius:12px;border:1px solid rgba(239,68,68,0.3);margin-top:10px;">
-                    <b>🚨 Top Ranked Dispatch Zone:</b> Zone #{hotspots.iloc[0]['cluster_id']} (Priority Score: {hotspots.iloc[0]['priority_score']})<br/>
-                    <b>👷 Municipal Recommendation:</b> Dispatch rapid asphalt paving unit to coordinates ({hotspots.iloc[0]['latitude']:.4f}, {hotspots.iloc[0]['longitude']:.4f})
+                    <b style="color:#ef4444;font-size:16px;">🚨 Top Priority Dispatch Work Order:</b> Zone #{top_z['cluster_id']} [{top_z['urgency']}]<br/>
+                    <div style="margin-top:6px;font-size:14px;line-height:1.6;">
+                        <b>📍 Target Location:</b> <span style="color:#38bdf8;font-weight:700;">{top_z['location_name']}</span><br/>
+                        <b>🗺️ Spatial Coordinates:</b> ({top_z['latitude']:.4f}, {top_z['longitude']:.4f})<br/>
+                        <b>👷 Municipal Action:</b> Dispatch rapid asphalt paving unit to <b>{top_z['location_name']}</b> ({top_z['total_potholes']} hazards reported by {top_z['report_count']} commuters).
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.info("No dense multi-pothole clusters yet. Single reports are plotted on the Live Map.")
+
+            # Comprehensive Citizen Incident Reports Table
+            with st.expander("📋 View Complete Citizen Incident Log (All Locations)", expanded=False):
+                log_df = df_rep[['created_at', 'location_name', 'pothole_count', 'severity_score', 'confidence_avg', 'latitude', 'longitude', 'status']].copy()
+                log_df.columns = ['Timestamp', '📍 Detected Place Name', 'Potholes', 'Severity Index', 'AI Conf', 'Latitude', 'Longitude', 'Status']
+                st.dataframe(log_df, use_container_width=True)
