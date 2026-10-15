@@ -306,20 +306,41 @@ def get_all_reports():
             pass
     if not records:
         conn = sqlite3.connect(DB_PATH)
+        conn.text_factory = lambda b: b.decode('utf-8', errors='ignore')
         df = pd.read_sql_query("SELECT * FROM reports ORDER BY created_at DESC", conn)
         conn.close()
         records = df.to_dict(orient="records")
 
-    # Ensure each report has a valid human-readable place name
+    # Sanitize every field to prevent PyArrow UnicodeDecodeError
+    clean_records = []
     for r in records:
-        if not r.get('location_name') or r.get('location_name') == "Unknown Location":
-            lat = pd.to_numeric(r.get('latitude'), errors='coerce')
-            lng = pd.to_numeric(r.get('longitude'), errors='coerce')
-            if pd.notna(lat) and pd.notna(lng):
-                r['location_name'] = get_place_name(lat, lng)
+        clean_r = {}
+        for k, v in r.items():
+            if isinstance(v, (bytes, bytearray)):
+                try:
+                    clean_r[k] = v.decode('utf-8', errors='ignore')
+                except Exception:
+                    clean_r[k] = ""
+            elif v is None:
+                clean_r[k] = ""
             else:
-                r['location_name'] = "Unspecified Location"
-    return records
+                clean_r[k] = str(v) if isinstance(v, (str, object)) and not isinstance(v, (int, float, bool)) else v
+
+        lat = pd.to_numeric(clean_r.get('latitude'), errors='coerce')
+        lng = pd.to_numeric(clean_r.get('longitude'), errors='coerce')
+        
+        # Ensure location_name is a valid, clean string
+        loc = clean_r.get('location_name')
+        if not loc or not str(loc).strip() or str(loc).strip() == "Unknown Location":
+            if pd.notna(lat) and pd.notna(lng):
+                clean_r['location_name'] = str(get_place_name(lat, lng))
+            else:
+                clean_r['location_name'] = "Unspecified Road"
+        else:
+            clean_r['location_name'] = str(loc)
+            
+        clean_records.append(clean_r)
+    return clean_records
 
 def save_report(image_bytes, file_name, lat, lng, count, conf, sev, loc_name=None):
     if not loc_name:
@@ -731,8 +752,20 @@ with tab_admin:
             df_rep = pd.DataFrame(records)
             hotspots = compute_municipal_priorities(df_rep)
             if not hotspots.empty:
-                disp_df = hotspots[['cluster_id', 'urgency', 'location_name', 'priority_score', 'report_count', 'total_potholes', 'avg_severity', 'latitude', 'longitude']].copy()
-                disp_df.columns = ['Zone #', 'Urgency', '📍 Detected Place / Street Name', 'Priority Score', 'Citizen Reports', 'Total Potholes', 'Avg Severity', 'Latitude', 'Longitude']
+                disp_rows = []
+                for _, s in hotspots.iterrows():
+                    disp_rows.append({
+                        'Zone #': int(s['cluster_id']),
+                        'Urgency': str(s['urgency']),
+                        '📍 Detected Place / Street Name': str(s['location_name']),
+                        'Priority Score': float(s['priority_score']),
+                        'Citizen Reports': int(s['report_count']),
+                        'Total Potholes': int(s['total_potholes']),
+                        'Avg Severity': float(s['avg_severity']),
+                        'Latitude': float(s['latitude']),
+                        'Longitude': float(s['longitude'])
+                    })
+                disp_df = pd.DataFrame(disp_rows)
                 st.dataframe(disp_df, use_container_width=True)
 
                 top_z = hotspots.iloc[0]
@@ -751,6 +784,25 @@ with tab_admin:
 
             # Comprehensive Citizen Incident Reports Table
             with st.expander("📋 View Complete Citizen Incident Log (All Locations)", expanded=False):
-                log_df = df_rep[['created_at', 'location_name', 'pothole_count', 'severity_score', 'confidence_avg', 'latitude', 'longitude', 'status']].copy()
-                log_df.columns = ['Timestamp', '📍 Detected Place Name', 'Potholes', 'Severity Index', 'AI Conf', 'Latitude', 'Longitude', 'Status']
+                clean_log_rows = []
+                for r in records:
+                    raw_ts = str(r.get('created_at', ''))
+                    try:
+                        ts_str = raw_ts.split('T')[0] + " " + raw_ts.split('T')[1][:8]
+                    except Exception:
+                        ts_str = raw_ts[:19]
+                    
+                    loc_val = str(r.get('location_name', 'Road Segment'))
+                    
+                    clean_log_rows.append({
+                        'Timestamp': str(ts_str),
+                        '📍 Detected Place Name': str(loc_val),
+                        'Potholes': int(pd.to_numeric(r.get('pothole_count', 1), errors='coerce') or 1),
+                        'Severity Index': round(float(pd.to_numeric(r.get('severity_score', 1.0), errors='coerce') or 1.0), 1),
+                        'AI Conf': f"{int((pd.to_numeric(r.get('confidence_avg', 0.85), errors='coerce') or 0.85)*100)}%",
+                        'Latitude': round(float(pd.to_numeric(r.get('latitude', 0.0), errors='coerce') or 0.0), 4),
+                        'Longitude': round(float(pd.to_numeric(r.get('longitude', 0.0), errors='coerce') or 0.0), 4),
+                        'Status': str(r.get('status', 'pending')).upper()
+                    })
+                log_df = pd.DataFrame(clean_log_rows)
                 st.dataframe(log_df, use_container_width=True)
