@@ -5,6 +5,7 @@ import json
 import sqlite3
 import datetime
 import urllib.request
+import urllib.parse
 import math
 import numpy as np
 import streamlit as st
@@ -56,7 +57,7 @@ CUSTOM_CSS = """
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# ==================== 2. GPS, REVERSE GEOCODING & TELEMETRY ====================
+# ==================== 2. GPS, GEOCODING & TELEMETRY ====================
 LOCATION_CACHE = {}
 
 def get_place_name(lat, lng):
@@ -92,6 +93,30 @@ def get_place_name(lat, lng):
     except Exception:
         pass
     return f"Road Segment ({lat:.4f}, {lng:.4f})"
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def search_city_coords(query):
+    """
+    Forward geocodes any city, area, or street name into exact coordinates.
+    """
+    if not query or len(str(query).strip()) < 2:
+        return None, None, None
+    try:
+        q = urllib.parse.quote(str(query).strip())
+        url = f"https://nominatim.openstreetmap.org/search?q={q}&format=json&limit=1"
+        req = urllib.request.Request(url, headers={'User-Agent': 'RoadGuard-CivicPlatform/2.0'})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data:
+                lat = round(float(data[0]['lat']), 6)
+                lon = round(float(data[0]['lon']), 6)
+                display_name = data[0].get('display_name', str(query))
+                parts = display_name.split(',')
+                short_name = ", ".join(parts[:3]) if len(parts) >= 3 else display_name
+                return lat, lon, short_name
+    except Exception:
+        pass
+    return None, None, None
 
 def convert_to_degrees(value):
     try:
@@ -153,75 +178,75 @@ class AutomatedPotholeDetector:
             except Exception:
                 self.model = None
 
-    def detect(self, image: Image.Image, conf_threshold=0.18):
-        # 1. Attempt YOLO Neural Detection across all bounding boxes
+    def detect(self, image: Image.Image):
+        from PIL import ImageDraw
+        img_copy = image.copy()
+        draw = ImageDraw.Draw(img_copy)
+        w, h = img_copy.size
+
+        # Path 1: Ultralytics YOLO inference (Sensitive threshold conf=0.18 for multi-pothole detection)
         if self.is_ready and self.model is not None:
             try:
-                img_np = np.array(image.convert("RGB"))
-                results = self.model.predict(source=img_np, conf=conf_threshold, verbose=False)
-                result = results[0]
-                boxes = result.boxes
-                count = len(boxes)
-                if count > 0:
-                    confidences = boxes.conf.cpu().numpy()
-                    avg_conf = float(np.mean(confidences))
-                    coords = boxes.xyxy.cpu().numpy()
-                    img_h, img_w, _ = img_np.shape
-                    total_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in coords)
-                    severity = min(10.0, (count * 1.8) + ((total_area / max(1.0, img_h * img_w)) * 18.0))
-                    
-                    # Direct PIL multi-box rendering (independent of cv2)
-                    from PIL import ImageDraw
-                    ann_img = image.convert("RGB").copy()
-                    draw = ImageDraw.Draw(ann_img)
-                    box_colors = ["#ef4444", "#f97316", "#e11d48", "#f43f5e", "#dc2626"]
-                    for i, (b, c) in enumerate(zip(coords, confidences)):
-                        x1, y1, x2, y2 = map(int, b)
-                        col = box_colors[i % len(box_colors)]
-                        for th in range(4):
-                            draw.rectangle([x1 - th, y1 - th, x2 + th, y2 + th], outline=col)
-                        label = f"Pothole #{i+1} ({int(c * 100)}%)"
-                        label_w = len(label) * 8 + 14
-                        draw.rectangle([x1, max(0, y1 - 22), x1 + label_w, y1], fill=col)
-                        draw.text((x1 + 6, max(0, y1 - 18)), label, fill="#ffffff")
-                        
-                    return ann_img, count, round(avg_conf, 2), round(severity, 2)
+                results = self.model(image, conf=0.18, verbose=False)
+                if results and len(results) > 0:
+                    boxes = results[0].boxes
+                    if boxes is not None and len(boxes) > 0:
+                        detected_boxes = []
+                        for box in boxes:
+                            coords = box.xyxy[0].tolist()
+                            conf = float(box.conf[0])
+                            bx1, by1, bx2, by2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
+                            detected_boxes.append((bx1, by1, bx2, by2, conf))
+
+                        count = len(detected_boxes)
+                        conf_list = [b[4] for b in detected_boxes]
+                        avg_conf = round(float(np.mean(conf_list)), 2)
+                        total_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in detected_boxes)
+                        severity = min(10.0, round((count * 1.5) + ((total_area / max(1.0, w * h)) * 16.0), 1))
+
+                        # Draw bounding boxes directly using PIL (prevents OpenCV crashes)
+                        box_colors = ["#ef4444", "#f97316", "#e11d48", "#f43f5e"]
+                        for i, (bx1, by1, bx2, by2, c) in enumerate(detected_boxes):
+                            col = box_colors[i % len(box_colors)]
+                            for th in range(4):
+                                draw.rectangle([bx1 - th, by1 - th, bx2 + th, by2 + th], outline=col)
+                            tag = f"Pothole #{i+1} ({int(c * 100)}%)"
+                            tag_w = len(tag) * 8 + 14
+                            draw.rectangle([bx1, max(0, by1 - 22), bx1 + tag_w, by1], fill=col)
+                            draw.text((bx1 + 6, max(0, by1 - 18)), tag, fill="#ffffff")
+
+                        return img_copy, count, avg_conf, severity
             except Exception:
                 pass
 
-        # 2. Resilient Multi-Cavity Vision Analyzer
-        # Scans road surface for multiple distinct asphalt ruptures & depressions
-        from PIL import ImageDraw
-        img_copy = image.convert("RGB").copy()
-        draw = ImageDraw.Draw(img_copy)
-        w, h = img_copy.size
-        
+        # Path 2: Multi-Cavity Vision Fallback Engine
         detected = []
         try:
-            gray = np.array(image.convert("L"))
-            road_top = int(h * 0.35)
-            road_area = gray[road_top:, :]
-            mean_lum = float(np.mean(road_area))
-            std_lum = float(np.std(road_area))
-            dark_thresh = mean_lum - (0.50 * std_lum)
+            gray = img_copy.convert("L")
+            gray_np = np.array(gray)
             
-            # Divide road into spatial candidate sectors (Left, Center, Right)
-            zones = [
-                (int(w * 0.08), int(w * 0.44), int(h * 0.42), int(h * 0.78)),
-                (int(w * 0.46), int(w * 0.88), int(h * 0.45), int(h * 0.82)),
-                (int(w * 0.28), int(w * 0.70), int(h * 0.62), int(h * 0.92)),
-            ]
-            for zx1, zx2, zy1, zy2 in zones:
-                roi = gray[zy1:zy2, zx1:zx2]
-                dark_pts = np.argwhere(roi < dark_thresh)
-                if len(dark_pts) > (roi.size * 0.035):
-                    min_y, min_x = dark_pts.min(axis=0)
-                    max_y, max_x = dark_pts.max(axis=0)
-                    bx1 = max(0, zx1 + min_x - 12)
-                    by1 = max(0, zy1 + min_y - 12)
-                    bx2 = min(w, zx1 + max_x + 12)
-                    by2 = min(h, zy1 + max_y + 12)
-                    if (bx2 - bx1) > 30 and (by2 - by1) > 25:
+            # Grid search for road cavity depressions across upper, mid, and lower road sectors
+            grid_y = [(0.25, 0.55), (0.45, 0.85)]
+            grid_x = [(0.08, 0.48), (0.50, 0.92)]
+            
+            for y_start, y_end in grid_y:
+                for x_start, x_end in grid_x:
+                    sy1, sy2 = int(h * y_start), int(h * y_end)
+                    sx1, sx2 = int(w * x_start), int(w * x_end)
+                    roi = gray_np[sy1:sy2, sx1:sx2]
+                    
+                    mean_val = np.mean(roi)
+                    dark_pts = np.where(roi < (mean_val - 22))
+                    if len(dark_pts[0]) > (roi.size * 0.04):
+                        dy1, dy2 = np.min(dark_pts[0]), np.max(dark_pts[0])
+                        dx1, dx2 = np.min(dark_pts[1]), np.max(dark_pts[1])
+                        
+                        pad = 12
+                        bx1 = max(0, sx1 + dx1 - pad)
+                        by1 = max(0, sy1 + dy1 - pad)
+                        bx2 = min(w, sx1 + dx2 + pad)
+                        by2 = min(h, sy1 + dy2 + pad)
+                        
                         c_val = round(0.84 + (0.12 * (len(dark_pts) / max(1, roi.size))), 2)
                         detected.append((bx1, by1, bx2, by2, min(0.96, c_val)))
         except Exception:
@@ -368,35 +393,65 @@ def save_report(image_bytes, file_name, lat, lng, count, conf, sev, loc_name=Non
     conn.close()
     return path
 
+def seed_potholes_at_coords(lat, lng, loc_name=None):
+    """Seeds realistic demo pothole clusters at the user's active city."""
+    if not loc_name:
+        loc_name = get_place_name(lat, lng)
+    conn = sqlite3.connect(DB_PATH)
+    # Generate 3 potholes close to each other (10-30 meters)
+    demo_data = [
+        (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", lat + 0.00012, lng + 0.00015, 3, 0.91, 8.2, 'pending', loc_name),
+        (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", lat - 0.00010, lng + 0.00008, 2, 0.88, 6.7, 'pending', loc_name),
+        (str(uuid.uuid4()), datetime.datetime.now().isoformat(), "", lat + 0.00005, lng - 0.00014, 4, 0.85, 9.0, 'pending', loc_name),
+    ]
+    conn.executemany("INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", demo_data)
+    conn.commit()
+    conn.close()
+
+def clear_all_reports():
+    """Clears all logged reports for a clean hackathon demo or local testing."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM reports")
+    conn.commit()
+    conn.close()
+    if USE_SUPABASE and supabase_client:
+        try:
+            supabase_client.table("reports").delete().neq("id", "0").execute()
+        except Exception:
+            pass
+
 # ==================== 5. MUNICIPAL PRIORITIZATION & MAP ====================
-def compute_municipal_priorities(reports_df, radius_meters=40.0):
-    if reports_df is None or len(reports_df) < 2:
+def compute_municipal_priorities(reports_df, radius_meters=50.0):
+    """
+    Groups reports by spatial proximity. Using min_samples=1 ensures EVERY reported
+    pothole is categorized and visible in the Municipal Priority Dispatch table.
+    """
+    if reports_df is None or len(reports_df) == 0:
         return pd.DataFrame()
     df = reports_df.copy()
     df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
     df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
     df = df.dropna(subset=['latitude', 'longitude'])
-    if len(df) < 2:
+    if df.empty:
         return pd.DataFrame()
     df['pothole_count'] = pd.to_numeric(df.get('pothole_count', 1), errors='coerce').fillna(1)
     df['severity_score'] = pd.to_numeric(df.get('severity_score', 1.0), errors='coerce').fillna(1.0)
+    
+    # Run DBSCAN with min_samples=1 so all reports generate an action zone
     coords_rad = np.radians(df[['latitude', 'longitude']].values)
-    db = DBSCAN(eps=radius_meters / 6371000.0, min_samples=2, metric='haversine')
+    db = DBSCAN(eps=radius_meters / 6371000.0, min_samples=1, metric='haversine')
     df['cluster_id'] = db.fit_predict(coords_rad)
-    clustered = df[df['cluster_id'] != -1]
-    if clustered.empty:
-        return pd.DataFrame()
+    
     hotspots = []
-    for cid, grp in clustered.groupby('cluster_id'):
+    for cid, grp in df.groupby('cluster_id'):
         rc = len(grp)
         tp = int(grp['pothole_count'].sum())
         av_sev = float(grp['severity_score'].mean())
-        score = (rc * 3.0) + (tp * 2.0) + (av_sev * 2.5)
-        urg = "CRITICAL" if score >= 30 else ("HIGH" if score >= 15 else "MEDIUM")
+        score = (rc * 4.0) + (tp * 2.5) + (av_sev * 3.0)
+        urg = "CRITICAL" if score >= 28 or av_sev >= 7.5 else ("HIGH" if score >= 14 or av_sev >= 5.0 else "MEDIUM")
         lat_c = float(grp['latitude'].mean())
         lng_c = float(grp['longitude'].mean())
         
-        # Determine human-readable location name for cluster
         loc_name = ""
         if 'location_name' in grp.columns:
             valid_locs = [str(l) for l in grp['location_name'].dropna().tolist() if str(l).strip() and str(l) != "Unknown Location"]
@@ -406,7 +461,7 @@ def compute_municipal_priorities(reports_df, radius_meters=40.0):
             loc_name = get_place_name(lat_c, lng_c)
 
         hotspots.append({
-            "cluster_id": int(cid),
+            "cluster_id": int(cid) + 1,
             "location_name": loc_name,
             "latitude": lat_c,
             "longitude": lng_c,
@@ -436,7 +491,7 @@ def build_map(reports_df, hotspots_df=None, user_lat=None, user_lng=None):
     if user_lat and user_lng:
         folium.Marker(
             [user_lat, user_lng],
-            popup="<b>📍 You Are Here (Current GPS Location)</b>",
+            popup="<b>📍 You Are Here (Active Position)</b>",
             tooltip="Live User Position",
             icon=folium.Icon(color="blue", icon="user", prefix="fa")
         ).add_to(m)
@@ -510,6 +565,25 @@ if "processed_files" not in st.session_state:
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
+# Universal Active Location State
+if "active_lat" not in st.session_state:
+    st.session_state.active_lat = None
+if "active_lng" not in st.session_state:
+    st.session_state.active_lng = None
+if "active_loc_name" not in st.session_state:
+    st.session_state.active_loc_name = None
+
+# Acquire Device Browser Geolocation if permitted
+gps = get_geolocation()
+if gps and "coords" in gps and gps["coords"]:
+    lat_val = gps["coords"].get("latitude")
+    lng_val = gps["coords"].get("longitude")
+    if lat_val and lng_val and (lat_val != 0.0 or lng_val != 0.0):
+        if st.session_state.active_lat is None:
+            st.session_state.active_lat = round(float(lat_val), 6)
+            st.session_state.active_lng = round(float(lng_val), 6)
+            st.session_state.active_loc_name = get_place_name(st.session_state.active_lat, st.session_state.active_lng)
+
 # ==================== 7. HERO HEADER WITH ROAD IMAGERY ====================
 hero_left, hero_right = st.columns([1.55, 1.05])
 
@@ -554,20 +628,53 @@ with k4:
 
 st.write("")
 
+# ==================== 8. UNIVERSAL LOCATION SELECTOR BAR ====================
+loc_bar1, loc_bar2 = st.columns([1.65, 1.35])
+
+with loc_bar1:
+    disp_loc = st.session_state.active_loc_name or (get_place_name(st.session_state.active_lat, st.session_state.active_lng) if st.session_state.active_lat else "Location Pending (Set below or sync GPS)")
+    coords_txt = f"({st.session_state.active_lat:.4f}, {st.session_state.active_lng:.4f})" if st.session_state.active_lat else "(Tap Sync GPS)"
+    st.markdown(f"""
+    <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.4);border-radius:14px;padding:12px 18px;display:flex;align-items:center;gap:12px;">
+        <span style="font-size:26px;">📍</span>
+        <div>
+            <small style="color:#94a3b8;font-weight:700;text-transform:uppercase;font-size:10px;">Active Device Inspection Location</small><br/>
+            <b style="color:#38bdf8;font-size:15px;">{disp_loc}</b> <small style="color:#64748b;">{coords_txt}</small>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with loc_bar2:
+    with st.expander("🔍 Change City / Set Location Manually", expanded=(st.session_state.active_lat is None)):
+        st.caption("If browser GPS is disabled, type your city or neighborhood to inspect potholes there:")
+        city_query = st.text_input("Enter City / Area:", placeholder="e.g. Pune, Jaipur, Indore, Bengaluru, Mumbai", label_visibility="collapsed")
+        c_b1, c_b2 = st.columns(2)
+        if c_b1.button("Set Location 🎯", use_container_width=True):
+            if city_query:
+                s_lat, s_lng, s_name = search_city_coords(city_query)
+                if s_lat and s_lng:
+                    st.session_state.active_lat = s_lat
+                    st.session_state.active_lng = s_lng
+                    st.session_state.active_loc_name = s_name
+                    st.success(f"📍 Set to: {s_name}")
+                    st.rerun()
+                else:
+                    st.error("Could not find that location. Try city name.")
+        if c_b2.button("Sync GPS 📡", use_container_width=True):
+            st.rerun()
+
+st.write("")
+
 # Navigation Tabs
 tab_upload, tab_map, tab_admin = st.tabs(["📸 Report Pothole (Auto-AI)", "🗺️ Live Map & Proximity Radar", "🏛️ Municipal Action Dispatch"])
 
-# User Geolocation
-gps = get_geolocation()
-user_curr_lat, user_curr_lng = None, None
-if gps and "coords" in gps and gps["coords"]:
-    user_curr_lat = round(gps["coords"].get("latitude", 0.0), 6)
-    user_curr_lng = round(gps["coords"].get("longitude", 0.0), 6)
+user_curr_lat = st.session_state.active_lat
+user_curr_lng = st.session_state.active_lng
 
 # ==================== TAB 1: REPORT POTHOLE DIVISION ====================
 with tab_upload:
     st.markdown("### 📷 Automated Road Defect Capture")
-    st.caption("Point your camera at the road. The AI detects all defect cavities simultaneously, calculates severity, logs GPS with reverse-geocoded place names, and broadcasts live hazard radar alerts.")
+    st.caption("Point your camera at the road. The AI detects all defect cavities simultaneously, calculates severity, logs GPS with verified place names, and broadcasts live hazard radar alerts.")
 
     # Educational Guide Cards
     g1, g2, g3 = st.columns(3)
@@ -605,12 +712,29 @@ with tab_upload:
     col_up_left, col_up_right = st.columns([1.1, 0.9])
 
     with col_up_left:
-        st.markdown("""
-        <div style="background:rgba(14,165,233,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:14px;padding:12px 18px;margin-bottom:12px;">
-            <b style="color:#38bdf8;font-size:14px;">📸 Real-Time Camera Road Scanner</b><br/>
-            <small style="color:#cbd5e1;">Point your device camera at the road and tap <b>'Take Photo'</b>. Multiple defects are simultaneously detected.</small>
-        </div>
-        """, unsafe_allow_html=True)
+        # Determine active tagging location
+        if user_curr_lat and user_curr_lng:
+            active_place_tag = st.session_state.active_loc_name or get_place_name(user_curr_lat, user_curr_lng)
+            st.markdown(f"""
+            <div style="background:rgba(14,165,233,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:14px;padding:12px 18px;margin-bottom:12px;">
+                <b style="color:#38bdf8;font-size:14px;">📸 Real-Time Camera Road Scanner</b><br/>
+                <small style="color:#cbd5e1;">Defect will be geo-tagged at: <b>{active_place_tag}</b> ({user_curr_lat:.4f}, {user_curr_lng:.4f})</small>
+            </div>
+            """, unsafe_allow_html=True)
+            f_lat, f_lng = user_curr_lat, user_curr_lng
+            target_loc_str = active_place_tag
+        else:
+            st.markdown("""
+            <div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:14px;padding:12px 18px;margin-bottom:12px;">
+                <b style="color:#f59e0b;font-size:14px;">📍 Select Location for This Report</b><br/>
+                <small style="color:#cbd5e1;">GPS not detected yet. Type your city or neighborhood below to tag this photo:</small>
+            </div>
+            """, unsafe_allow_html=True)
+            quick_city = st.text_input("Report Location City/Area:", value="Indore", label_visibility="collapsed")
+            q_lat, q_lng, q_name = search_city_coords(quick_city)
+            f_lat = q_lat or 22.7196
+            f_lng = q_lng or 75.8577
+            target_loc_str = q_name or quick_city
 
         # Pure Live Photo Option Only (st.camera_input)
         img_file = st.camera_input("Point camera at road defect and capture live", label_visibility="collapsed")
@@ -620,20 +744,10 @@ with tab_upload:
             import hashlib
             sig = hashlib.md5(file_bytes).hexdigest()
             pil_img = Image.open(io.BytesIO(file_bytes))
-            f_lat, f_lng = user_curr_lat, user_curr_lng
-            if not f_lat or not f_lng:
-                ex_lat, ex_lng = extract_exif_gps(pil_img)
-                if ex_lat and ex_lng:
-                    f_lat, f_lng = ex_lat, ex_lng
-            if not f_lat or not f_lng:
-                st.info("📍 Location not detected automatically. Confirm coordinates:")
-                c1, c2 = st.columns(2)
-                f_lat = c1.number_input("Latitude", value=28.6139, format="%.6f")
-                f_lng = c2.number_input("Longitude", value=77.2090, format="%.6f")
 
             if sig not in st.session_state.processed_files:
                 with st.spinner("🤖 Running multi-defect AI road inspection & geocoding..."):
-                    loc_name = get_place_name(f_lat, f_lng)
+                    loc_name = target_loc_str or get_place_name(f_lat, f_lng)
                     ann_img, count, conf, sev = detector.detect(pil_img)
                     if count > 0:
                         buf = io.BytesIO()
@@ -705,7 +819,7 @@ with tab_map:
                 </div>
                 """, unsafe_allow_html=True)
         elif not user_curr_lat:
-            st.info("💡 Grant browser location permissions to see your live **'📍 You Are Here'** blue radar pin and receive real-time hazard alerts.")
+            st.info("💡 Tap **'Change / Search City'** above to center your live **'📍 You Are Here'** radar on your real city.")
 
     with map_info_right:
         st.markdown("""
@@ -719,13 +833,12 @@ with tab_map:
         </div>
         """, unsafe_allow_html=True)
 
-    if records:
-        df_rep = pd.DataFrame(records)
-        hotspots = compute_municipal_priorities(df_rep)
-        f_map = build_map(df_rep, hotspots, user_lat=user_curr_lat, user_lng=user_curr_lng)
-        st_folium(f_map, use_container_width=True, height=580)
-    else:
-        st.info("No reports logged yet.")
+    df_rep = pd.DataFrame(records) if records else pd.DataFrame()
+    hotspots = compute_municipal_priorities(df_rep) if not df_rep.empty else pd.DataFrame()
+    f_map = build_map(df_rep, hotspots, user_lat=user_curr_lat, user_lng=user_curr_lng)
+    st_folium(f_map, use_container_width=True, height=580)
+    if not records:
+        st.info("ℹ️ No potholes reported yet. Use the camera in Tab 1 or click 'Seed Demo' in Tab 3 to visualize live hazards.")
 
 # ==================== TAB 3: MUNICIPAL ACTION DIVISION ====================
 with tab_admin:
@@ -745,6 +858,22 @@ with tab_admin:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        # Demo Polish: Seed hazards at current location or Clear Reports
+        c_seed1, c_seed2 = st.columns(2)
+        with c_seed1:
+            if st.button("📍 Seed in My City", use_container_width=True):
+                cur_lat = user_curr_lat or 22.7196
+                cur_lng = user_curr_lng or 75.8577
+                cur_name = st.session_state.active_loc_name or get_place_name(cur_lat, cur_lng)
+                seed_potholes_at_coords(cur_lat, cur_lng, cur_name)
+                st.success(f"Seeded demo cluster at {cur_name}!")
+                st.rerun()
+        with c_seed2:
+            if st.button("🗑️ Clear Reports", use_container_width=True):
+                clear_all_reports()
+                st.success("All reports cleared! Ready for live citizen submission.")
+                st.rerun()
 
     with muni_col1:
         records = get_all_reports()
@@ -780,7 +909,7 @@ with tab_admin:
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.info("No dense multi-pothole clusters yet. Single reports are plotted on the Live Map.")
+                st.info("No reports logged yet.")
 
             # Comprehensive Citizen Incident Reports Table
             with st.expander("📋 View Complete Citizen Incident Log (All Locations)", expanded=False):
